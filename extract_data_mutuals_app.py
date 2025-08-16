@@ -23,7 +23,7 @@ async def find_mutual_connections(crawlingAgent, PROFILE_URL):
     await crawlingAgent.start_process(PROFILE_URL)
     try:
         # Try locating with short timeout
-        mutual_button = await crawlingAgent.locate("a:has-text('mutual connection')")
+        mutual_button = await crawlingAgent.locate("a:has-text('mutual connections')")
     except:
         print("[!] Mutual connection button not found.")
         return [], []
