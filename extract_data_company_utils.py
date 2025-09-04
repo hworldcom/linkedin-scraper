@@ -235,7 +235,7 @@ class WebCrawler:
     async def press_enter(self):
         await self.page.keyboard.press("Enter")
 
-    async def locate_within_scroll(self, text, MAX_SCROLLS=2, DELAY=1): #todo:change scroll number for prod
+    async def locate_within_scroll(self, text, MAX_SCROLLS=10, DELAY=1): #todo:change scroll number for prod
 
         for i in range(MAX_SCROLLS):
             # Try to locate the 'Next' button
@@ -302,6 +302,89 @@ class WebCrawler:
             print(f"[!] AppleScript error: {e}")
             return 0, 0
 
+
+
+
+    async def find_next_button(self):
+        # Preferred: LinkedIn's data-testid (most stable)
+        btn = self.page.locator('button[data-testid="pagination-control-next-btn"]').first
+        if await btn.count():
+            return btn
+
+        # Fallback: aria-label contains "Next" (handles "Next page", i18n risk)
+        btn = self.page.locator('button[aria-label*="Next" i]').first
+        if await btn.count():
+            return btn
+
+        # Fallback: role + name (Playwright's accessible name)
+        btn = self.page.get_by_role("button", name=lambda n: "next" in n.lower())
+        if await btn.count():
+            return btn.first
+
+        return None
+
+
+    async def is_button_disabled(self, btn):
+        if not btn:
+            return True
+        # check multiple patterns
+        aria = await btn.get_attribute("aria-disabled")
+        if aria and aria.lower() == "true":
+            return True
+        dis = await btn.get_attribute("disabled")
+        if dis is not None:
+            return True
+        # sometimes class toggles reflect disabled; you can add a heuristic here if needed
+        return False
+
+    async def click_next_page(self, results_selector: str, wait_timeout_ms: int = 8000):
+        """
+        Clicks next and waits for the results to change.
+        `results_selector` should be a selector that matches one or more result items.
+        Returns True if it navigated, False if there is no next / disabled.
+        """
+        btn = await self.find_next_button()
+        if not btn:
+            print("[pagination] Next button not found.")
+            return False
+
+        if await self.is_button_disabled(btn):
+            print("[pagination] Next is disabled.")
+            return False
+
+        # capture a stable thing from current page to detect change
+        prev_first = self.page.locator(results_selector).first
+        prev_text = ""
+        try:
+            prev_text = await prev_first.inner_text()
+        except Exception:
+            pass
+
+        await btn.scroll_into_view_if_needed()
+        await btn.click()
+
+        # wait for change: either first item text changes or the list re-renders
+        try:
+            await self.page.wait_for_timeout(300)  # small debounce
+            await self.page.wait_for_function(
+                """(sel, prev) => {
+                     const el = document.querySelector(sel);
+                     if (!el) return false;
+                     const t = el.textContent || '';
+                     return t.trim() !== (prev || '').trim();
+                   }""",
+                arg=(results_selector, prev_text),
+                timeout=wait_timeout_ms
+            )
+            return True
+        except Exception:
+            # as fallback, wait for network idle or small delay
+            try:
+                await self.page.wait_for_load_state("networkidle", timeout=2000)
+            except Exception:
+                pass
+            return True
+
 async def main():
 
     COMPANY_NAME = "covivio"
@@ -311,28 +394,30 @@ async def main():
 
 
 async def extract_data_urls_names_company(crawlingAgent, COMPANY_NAME):
-
+    # Focus the global search
     search_button_location = await crawlingAgent.locate(".search-global-typeahead input")
-    await crawlingAgent.move_to_location(search_button_location)
-
     await crawlingAgent.click(search_button_location)
-    #search for a company
+
+    # Search for the company
     await crawlingAgent.type(COMPANY_NAME)
     await crawlingAgent.press_enter()
     await crawlingAgent.timeout()
-    companies_tab = await crawlingAgent.locate("button:has-text('Companies'), a:has-text('Companies')")
-    await crawlingAgent.move_to_location(companies_tab)
-    await crawlingAgent.click(companies_tab)
-    #container contains results of search
-    await crawlingAgent.wait_to_appear("div.search-results-container")
-    #results_container = await crawlingAgent.locate("div.search-results-container")
 
+    # Go to "Companies" tab (support both button and anchor)
+    companies_tab = await crawlingAgent.locate("button:has-text('Companies'), a:has-text('Companies')")
+    await crawlingAgent.click(companies_tab)
+
+    # Wait for results to render
+    await crawlingAgent.wait_to_appear("div.search-results-container")
+
+    # Collect result <li> items
     ul_lists = await crawlingAgent.locate_all("ul[role='list']")
     all_items = []
     for ul in ul_lists:
         items = await crawlingAgent.locate_all_within(ul, "li")
         all_items.extend(items)
 
+    # Pick first valid company result
     company_link = None
     for item in all_items:
         try:
@@ -343,73 +428,111 @@ async def extract_data_urls_names_company(crawlingAgent, COMPANY_NAME):
                 break
         except:
             continue
+
     if not company_link:
         raise Exception("❌ No valid company link found.")
 
+    # Open the company page
+    await company_link.click()
 
-    await crawlingAgent.move_to_location(a_tag.first)
-    await a_tag.first.click()
+    # Click the "employees" link on the org top card
     employee_button = await crawlingAgent.locate(
-        "div.org-top-card-summary-info-list div.inline-block >> a:has(span:has-text('employees'))")
-    await crawlingAgent.move_to_location(employee_button)
+        "div.org-top-card-summary-info-list div.inline-block >> a:has(span:has-text('employees'))"
+    )
     await crawlingAgent.click(employee_button)
-    second_degree_button = await crawlingAgent.locate(
-        "nav[aria-label='Search filters'] legend.visually-hidden:has-text('Connections filter')"
-        " >> xpath=.. >> button[aria-label='2nd']")
-    await crawlingAgent.move_to_location(second_degree_button)
-    await crawlingAgent.click(second_degree_button)
-    await crawlingAgent.timeout()
+
+    # ---- NEW: robust selector for Connections filter radios ----
+    # They are now <div role="radio"> with a <label> containing '1st', '2nd', '3rd+'.
+    # We scope to the top filter bar/toolbar to avoid accidental matches.
+    # Try '2nd' first; if not visible, fall back to opening the filters bar or retry.
+    async def click_connection_degree(label_text: str):
+        # Most reliable: click the label directly (it toggles the underlying checkbox/radio)
+        # Narrow scope to filter toolbar: role=toolbar (present on the results page)
+        degree_label = crawlingAgent.page.locator(
+            "div[role='toolbar'] label:has-text('%s')" % label_text
+        )
+        # Fallback: any visible label with text
+        if not await degree_label.first.is_visible():
+            degree_label = crawlingAgent.page.locator("label:has-text('%s')" % label_text)
+
+        await degree_label.first.scroll_into_view_if_needed()
+        await degree_label.first.click()
+
+        # Wait for results to refresh (either network idle or a small debounce)
+        await crawlingAgent.timeout(TIMEOUT_IN_MS=1500)
+
+    # Click "2nd" (or "1st" if you prefer)
+    await click_connection_degree("2nd")
+
+    # Optional: ensure it actually toggled (aria-checked="true")
+    # We check the closest radio with that label
+    second_radio = crawlingAgent.page.locator(
+        "div[role='radio']:has(label:has-text('2nd'))"
+    ).first
+    try:
+        await second_radio.wait_for(state="attached", timeout=2000)
+        checked = await second_radio.get_attribute("aria-checked")
+        if checked != "true":
+            # Click again if needed (LinkedIn sometimes swallows clicks on fast pages)
+            await (crawlingAgent.page.locator("label:has-text('2nd')").first).click()
+            await crawlingAgent.timeout(TIMEOUT_IN_MS=1000)
+    except:
+        pass
+
+    # ---- extract names/urls from the search results ----
     profile_names = []
     profile_urls = []
     await extract_data_names_urls(crawlingAgent, profile_names, profile_urls)
 
-    return (profile_names,profile_urls)
+    return (profile_names, profile_urls)
 
 
 async def extract_data_names_urls(crawlingAgent, profile_names, profile_urls):
+    RESULT_ITEM_SELECTOR = "div.search-results-container ul[role='list'] > li"
+
     while True:
-        # Extract current page's names and URLs
         await extract_page_names_urls(crawlingAgent, profile_names, profile_urls)
 
-        try:
-            # Try to locate the 'Next' button
-            # next_button = await crawlingAgent.locate_no_wait("button[aria-label='Next']")
-            next_button = await crawlingAgent.locate_within_scroll("button[aria-label='Next']")
-
-            # Check if it is **disabled**
-            is_disabled = await next_button.get_attribute("disabled")
-            if is_disabled is not None:
-                print("[!] Reached the last page. Stopping.")
-                break
-
-            print("[→] Going to next page...")
-            await crawlingAgent.move_to_location(next_button)
-            await crawlingAgent.click(next_button)
-            await crawlingAgent.timeout(TIMEOUT_IN_MS=3000)
-
-        except Exception as e:
-            print(f"[!] Could not find or click next button: {e}")
+        advanced = await crawlingAgent.click_next_page(RESULT_ITEM_SELECTOR)
+        if not advanced:
+            print("[pagination] No more pages or could not advance.")
             break
+
+        # small human-ish pause before scraping the next page
+        await crawlingAgent.timeout(TIMEOUT_IN_MS=1200)
+
 
 
 async def extract_page_names_urls(crawlingAgent, profile_names, profile_urls):
-    #todo: check if no wait makes sense
-    profiles_results = await crawlingAgent.locate_all("div.search-results-container ul[role='list'] > li", text="profile")
-    #profiles_results = results.filter(has_text="View")
-    count = len(profiles_results)
-    for i in range(count):
-        try:
-            item = profiles_results[i]
-            # Select ONLY the first matching <a> in the list item
-            link = await item.locator("a").first.get_attribute("href")
-            name = await item.locator('span[dir="ltr"] > span[aria-hidden="true"]').first.inner_text()
-            profile_urls.append(link)
-            profile_names.append(name)
-            print(f"[✓] {name.strip()} → {link.strip()}")
+    # wait for any result to show
+    await crawlingAgent.page.wait_for_selector('[data-view-name="people-search-result"]', timeout=15000)
+    cards = await crawlingAgent.page.locator('[data-view-name="people-search-result"]').all()
 
+    for i, card in enumerate(cards):
+        try:
+            # Prefer the explicit title link
+            title_link = card.locator('a[data-view-name="search-result-lockup-title"]').first
+            if await title_link.count() > 0:
+                name = (await title_link.inner_text()).strip()
+                href = await title_link.get_attribute("href")
+            else:
+                # Fallback: any link to /in/...
+                any_profile = card.locator('a[href*="linkedin.com/in/"]').first
+                href = await any_profile.get_attribute("href")
+                # Fallback name: the first <p> with the lockup title structure
+                name_p = card.locator('p >> a[href*="linkedin.com/in/"]').first
+                name = (await name_p.inner_text()).strip() if await name_p.count() > 0 else "(unknown)"
+
+            if href:
+                profile_urls.append(href)
+                profile_names.append(name)
+                print(f"[✓] {name} → {href}")
         except Exception as e:
-            print(f"[!] Error on item {i}: {e}")
-    ### end of extraction for a page
+            print(f"[!] Error on card {i}: {e}")
+
+    # small jitter to mimic human dwell, helps with lazy hydration
+    await crawlingAgent.page.wait_for_timeout(500 + random.randint(0, 400))
+
 
 
 if __name__ == '__main__':

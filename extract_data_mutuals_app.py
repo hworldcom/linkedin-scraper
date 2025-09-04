@@ -36,7 +36,7 @@ async def find_mutual_connections(crawlingAgent, PROFILE_URL):
     print(f"Sleeping for {delay:.2f} ms...\n")
 
     await crawlingAgent.timeout(delay)
-    await crawlingAgent.move_to_location(mutual_button)
+    #await crawlingAgent.move_to_location(mutual_button)
     await crawlingAgent.click(mutual_button)
 
     profile_names = []

@@ -6,8 +6,8 @@ from openpyxl import Workbook
 from extract_data_company_utils import extract_data_urls_names_company  # Make sure path is correct
 from extract_data_company_utils import WebCrawler
 # List of companies to process
-companies = ["covivio","banxware"]
-#companies = ["banxware"]
+#companies = ["covivio","banxware"]
+companies = ["banxware"]
 
 async def main():
     # Create a Pandas Excel writer object using openpyxl engine
