@@ -6,6 +6,7 @@ import subprocess
 import pyautogui
 import random
 import time
+from next_button_helpers import click_next_page
 
 class WebCrawler:
 
@@ -488,18 +489,18 @@ async def extract_data_urls_names_company(crawlingAgent, COMPANY_NAME):
 
 
 async def extract_data_names_urls(crawlingAgent, profile_names, profile_urls):
-    RESULT_ITEM_SELECTOR = "div.search-results-container ul[role='list'] > li"
-
     while True:
         await extract_page_names_urls(crawlingAgent, profile_names, profile_urls)
 
-        advanced = await crawlingAgent.click_next_page(RESULT_ITEM_SELECTOR)
-        if not advanced:
-            print("[pagination] No more pages or could not advance.")
+        try:
+            did_advance = await click_next_page(crawlingAgent.page)
+            if not did_advance:
+                print("[!] No next page (missing or disabled).")
+                break
+        except Exception as e:
+            print(f"[!] Could not go to next page: {e}")
             break
 
-        # small human-ish pause before scraping the next page
-        await crawlingAgent.timeout(TIMEOUT_IN_MS=1200)
 
 
 
