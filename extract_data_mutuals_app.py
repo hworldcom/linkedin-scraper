@@ -4,7 +4,7 @@ from openpyxl import Workbook
 from extract_data_company_utils import WebCrawler
 from extract_data_company_utils import extract_data_names_urls
 import pandas as pd
-from typing import Dict
+from typing import Dict, List
 import random
 
 # List of companies to process
@@ -18,12 +18,12 @@ async def main():
 
     print("extracted")
 
-async def find_mutual_connections(crawlingAgent, PROFILE_URL):
+async def find_mutual_connections(agent, PROFILE_URL):
 
-    await crawlingAgent.start_process(PROFILE_URL)
+    await agent.start_process(PROFILE_URL)
     try:
         # Try locating with short timeout
-        mutual_buttons = await crawlingAgent.locate("a:has-text('mutual connection')")
+        mutual_buttons = await agent.locate("a:has-text('mutual connection')")
         count_mutual_buttons = await mutual_buttons.count()
         if count_mutual_buttons > 0:
             mutual_button = mutual_buttons.nth(0)
@@ -35,14 +35,13 @@ async def find_mutual_connections(crawlingAgent, PROFILE_URL):
     delay = random.uniform(2.5, 4)*1000
     print(f"Sleeping for {delay:.2f} ms...\n")
 
-    await crawlingAgent.timeout(delay)
-    #await crawlingAgent.move_to_location(mutual_button)
-    await crawlingAgent.click(mutual_button)
+    await agent.timeout(delay)
+    await agent.click(mutual_button)
 
-    profile_names = []
-    profile_urls = []
-    await extract_data_names_urls(crawlingAgent, profile_names, profile_urls)
-    return profile_names, profile_urls
+    names: List[str] = []
+    urls: List[str] = []
+    await extract_data_names_urls(agent, names, urls)
+    return names, urls
 
 
 async def process_excel_mutuals(file_path: str, output_path: str):

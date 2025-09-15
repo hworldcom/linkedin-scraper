@@ -446,15 +446,15 @@ async def extract_data_urls_names_company(crawlingAgent, COMPANY_NAME):
     # They are now <div role="radio"> with a <label> containing '1st', '2nd', '3rd+'.
     # We scope to the top filter bar/toolbar to avoid accidental matches.
     # Try '2nd' first; if not visible, fall back to opening the filters bar or retry.
-    async def click_connection_degree(label_text: str):
+    async def click_connection_degree(degree_text: str):
         # Most reliable: click the label directly (it toggles the underlying checkbox/radio)
         # Narrow scope to filter toolbar: role=toolbar (present on the results page)
         degree_label = crawlingAgent.page.locator(
-            "div[role='toolbar'] label:has-text('%s')" % label_text
+            "div[role='toolbar'] label:has-text('%s')" % degree_text
         )
         # Fallback: any visible label with text
         if not await degree_label.first.is_visible():
-            degree_label = crawlingAgent.page.locator("label:has-text('%s')" % label_text)
+            degree_label = crawlingAgent.page.locator("label:has-text('%s')" % degree_text)
 
         await degree_label.first.scroll_into_view_if_needed()
         await degree_label.first.click()
