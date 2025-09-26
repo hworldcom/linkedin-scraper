@@ -7,6 +7,7 @@ import pyautogui
 import random
 import time
 from next_button_helpers import click_next_page
+import re
 
 class WebCrawler:
 
@@ -405,8 +406,9 @@ async def extract_data_urls_names_company(crawlingAgent, COMPANY_NAME):
     await crawlingAgent.timeout()
 
     # Go to "Companies" tab (support both button and anchor)
-    companies_tab = await crawlingAgent.locate("button:has-text('Companies'), a:has-text('Companies')")
-    await crawlingAgent.click(companies_tab)
+    ok = await _click_companies_tab(crawlingAgent)
+    if not ok:
+        raise RuntimeError("Could not find/click the 'Companies' tab.")
 
     # Wait for results to render
     await crawlingAgent.wait_to_appear("div.search-results-container")
@@ -502,6 +504,65 @@ async def extract_data_names_urls(crawlingAgent, profile_names, profile_urls):
             break
 
 
+
+async def _click_companies_tab(crawlingAgent, raise_on_fail: bool = True) -> bool:
+    """
+    Click the 'Companies' pill in the Search filters toolbar.
+    Scopes to the toolbar to avoid strict-mode collisions.
+    """
+    page = crawlingAgent.page
+    reasons = []
+
+    # Scope to the toolbar you pasted
+    toolbar = page.locator("nav[aria-label='Search filters']")
+
+    # Try a few precise, scoped selectors (in order)
+    attempts = [
+        ("scoped-role-button",
+         toolbar.get_by_role("button", name=re.compile(r"^\s*Companies\s*$", re.I))),
+        ("scoped-pills-ul",
+         toolbar.locator("ul.search-reusables__filter-list button:has-text('Companies')")),
+        ("scoped-generic",
+         toolbar.locator(":is(button,a):has-text('Companies')")),
+    ]
+
+    for name, loc in attempts:
+        try:
+            # Normalize to a Locator if a get_by_role call returned a Locator
+            locator = loc if hasattr(loc, "count") else page.locator(loc)
+
+            # Wait for at least one match inside the toolbar
+            await locator.first.wait_for(state="visible", timeout=3000)
+            cnt = await locator.count()
+            if cnt == 0:
+                reasons.append(f"{name}: 0 matches")
+                continue
+
+            # Click the pill
+            await locator.first.click()
+
+            # Optionally: wait for the tab state to reflect selection
+            # (LinkedIn uses aria-pressed on these pills)
+            try:
+                pressed = toolbar.get_by_role("button", name=re.compile(r"^\s*Companies\s*$", re.I)).first
+                await pressed.wait_for(state="attached", timeout=2000)
+                aria_pressed = await pressed.get_attribute("aria-pressed")
+                if aria_pressed == "true":
+                    return True
+            except Exception:
+                # Fallback: slight delay & continue
+                await page.wait_for_timeout(400)
+                return True
+
+        except Exception as e:
+            reasons.append(f"{name}: {type(e).__name__}: {e}")
+
+    msg = "❌ Could not find/click the 'Companies' tab (scoped to Search filters).\n" + "\n".join(reasons)
+    if raise_on_fail:
+        raise RuntimeError(msg)
+    else:
+        print("[companies tab][debug]", msg, flush=True)
+        return False
 
 
 async def extract_page_names_urls(crawlingAgent, profile_names, profile_urls):
